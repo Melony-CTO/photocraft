@@ -1,0 +1,93 @@
+name: "PhotoCraft macOS Unsigned Build"
+
+# Builds an UNSIGNED (ad-hoc signed, not notarized) universal macOS PhotoCraft.app + .dmg on the
+# free `macos-latest` runner and uploads them as a workflow artifact. It mirrors the macOS job of
+# storytold/craft-common-actions release.yml, minus certificate import, notarization, the release
+# environment and GitHub release publishing. packaging/macos/package.sh ad-hoc signs ("-") when
+# MACOS_SIGN_IDENTITY is unset.
+#
+# Run it from the Actions tab ("Run workflow"), or push to `photocraft-macos-unsigned`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "Architecture: universal, aarch64 or x86_64"
+        required: false
+        default: "universal"
+  push:
+    branches:
+      - photocraft-macos-unsigned
+
+permissions:
+  contents: read
+
+concurrency:
+  group: photocraft-macos-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos-unsigned:
+    name: macOS ${{ github.event.inputs.arch || 'universal' }} (unsigned)
+    runs-on: macos-latest
+    timeout-minutes: 240
+    env:
+      ARCH: ${{ github.event.inputs.arch || 'universal' }}
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+      PHOTOCRAFT_BUILD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf ~/Library/Android/sdk /usr/local/share/dotnet ~/.ghcup /usr/local/.ghcup \
+            /Users/runner/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Check out craft-fonts
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-fonts
+          ref: abb83316d96aa59c1cf64784289e378fe9fa5695
+          path: craft-fonts
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-unsigned-${{ env.ARCH }}
+          cache-on-failure: true
+
+      - name: Build and package (ad-hoc signed, not notarized)
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
+        run: |
+          # Make sure package.sh takes its ad-hoc path.
+          unset MACOS_SIGN_IDENTITY MACOS_KEYCHAIN APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          packaging/macos/package.sh --arch "$ARCH"
+          df -h /
+
+      - name: Verify signature integrity
+        run: packaging/macos/verify.sh --arch "$ARCH"
+
+      - name: Collect artifacts
+        run: |
+          APP=target/macos-package/PhotoCraft.app
+          codesign -dv --verbose=2 "$APP" || true
+          lipo -info "$APP/Contents/MacOS/PhotoCraft"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/release/PhotoCraft-macos-$ARCH.app.zip"
+          ls -la dist/release
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoCraft-macos-${{ env.ARCH }}-unsigned
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 14
